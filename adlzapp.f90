@@ -34,22 +34,46 @@
     !     integer, parameter :: mk = 16
     integer, parameter :: mk = 8
 
-    !     Degrees of freedom is defined here (qdim is defined to accomadate for xq containing v's):
-    integer, parameter :: dof = 1
-    integer, parameter :: qdim = 2*dof
-    integer, parameter :: d = 1 !Spatial degrees of freedom
-    integer, parameter :: nop = dof/d !Determine number of particles from given information
-    
+    !     Dimension of problem is defined here:
+    integer, parameter :: d = 1
+    integer, parameter :: nop = 2
+    integer, parameter :: dof = nop*d
+    integer, parameter :: qdim = dof*2
 
-    !     Coordinates (q:1-6, p:7-12) and forces/velocities ("right sides" defined as fv)
-    !The first qdim/2 elements of xq are x, second are v_x, third are p, fourth are v_p
-    real (kind = mk), dimension (1:2*qdim) :: xq, fv
+    !     Coordinates (q:1-6, p:7-12) and forces ("right sides")
+    real (kind = mk), dimension (1:2*qdim) :: xq
+    real (kind = mk), dimension (1:2*qdim) :: fv = 0.0_mk
     ! Time and time step
     real (kind = mk) :: xtime, xdt
 
-    ! Create array of masses (each element corresponds to each particle)
-    real (kind = mk), dimension(1:nop) :: mi = 1.0_mk
-        
+    ! Masses
+    real (kind = mk), dimension (1:nop) :: mi = 1.0_mk
+    real (kind = mk), dimension (1:dof) :: mass = 0.0_mk
+
+    !Fast Lyapunov Indicator
+    real (kind = mk) :: FLI 
+
+    ! Constants for potentials
+    real (kind = mk) :: De = 1.0_mk
+    real (kind = mk) :: a = 1.0_mk
+    real (kind = mk) :: re = 1.0_mk
+    real (kind = mk) :: kMeyer = 1.0_mk !Meyer potential mixing coeffecient
+    real (kind = mk) :: kext = 1.0_mk !Spring coeffecient for external harm osc trap
+
+    !Define Initial conditions
+    real(kind = mk), dimension(1:dof) :: qi = 0.0_mk
+    real(kind = mk), dimension(1:dof) :: vqi = 0.0_mk
+    real(kind = mk), dimension(1:dof) :: momentumi = 0.0_mk
+    real(kind = mk), dimension(1:dof) :: vmomentumi = 0.0_mk
+
+    contains
+            subroutine masses
+                integer i
+                do i =1,nop
+                        mass((i-1)*d+1:i*d) = mi(i)
+                enddo
+            end subroutine masses
+
   end module coordinates
 
   !----------------------------------------------------------------------
@@ -177,78 +201,107 @@
 
     ! This driver computes one cycle of a harmonic oscillator and returns
     ! some test data. The "right sides" are computed by subroutines pots1
-    ! and pots2 below. The precision of the calculation (mk) and the
+    ! and potsMeyer2 below. The precision of the calculation (mk) and the
     ! dimension of the problem (qdim) are set in module coordinates.
     !
     ! Valid in fixed and free form Fortran 90
     !
-    use coordinates,  only : mk, qdim, dof, d, xq, fv, xtime, xdt
+    use coordinates
 
     implicit none
 
     integer :: vals(1:8)
     INTEGER(KIND=4) :: nn, ncall
-    real(kind=mk) :: ttotal
-
+    real(kind = mk) :: oscs = 0.0_mk
+    integer :: i,j,m,k
+    
     real(kind=mk), parameter ::                                       &
          & pi = 3.1415926535897932384626433832795029_mk
-    real(kind = mk) :: qf, pf, phif, tf, ef
+    real(kind = mk) :: qf, pf, phif, tf, ef, ei, normv, normv0, T, Ti
+    real(kind = mk) :: Vtot, Vtoti = 0.0_mk
 
-    external pots1, pots2
+    external pots1, potsMeyer2
+    integer, external :: vectpos
+    real (kind = mk), external :: r, V, dVdr, d2Vdr2
+    call masses
 
     ! Input of stepsize:
     write (*,*) "Total number of steps: "
     read  (*,*) ncall
-    write (*,*) "Total time:"
-    read  (*,*) ttotal
-    xdt = ttotal/real(ncall,kind=mk)
-    xtime = 0.0_mk
-    write(6,*) xtime, xdt
+    write (*,*) "Step size: "
+    read (*,*) xdt
 
-    ! File for reporting results:
-    open(9, file="testsymp.res", position="append")
-    call date_and_time(values=vals)
-    write (9,*) vals(1:3), "  ", vals(5:8)
-    write (9,*) "Dimension: ", qdim, "    Calls per cycle ", ncall
+    !Redefine initial conditions
+    qi(1) = -1.0_mk !x(1,1)
+    qi(2) = 1.0_mk !x(1,2)
+    vqi(1) = 0.1_mk !v_x
+    vqi(2) = 0.0_mk !v_y
+    momentumi(1) = 0.0_mk !p(1,1)
+    momentumi(2) = 0.5_mk !p(1,2)
+    vmomentumi(1) = -0.001_mk !v_px
+    vmomentumi(2) = 0.001_mk !v_py
 
-    ! Initial conditions:
-    xq(1:dof) =1.0_mk !x's
-    xq(dof+1:qdim) =0.0_mk !v_x's
-    xq(qdim+1:qdim+dof) = 0.0_mk !p's
-    xq(qdim+dof+1:2*qdim) =0.0_mk !v_p's
+    ! Assign initial conditions:
+    xq(1:dof) = qi !q's
+    xq(dof+1:qdim) = vqi !v_q's
+    xq(qdim+1:qdim+dof) = momentumi !p's
+    xq(qdim+dof+1:2*qdim) = vmomentumi !v_p's
 
-    ! Redefinition of time step to get ncall steps for one cycle:
-    !xdt = xdt*2.0_mk*pi !use only if you just want one period
-    write(102,*) xtime, xq(1:dof), xq(qdim+1:qdim+dof) !write initial time, x, p
+    !data file for results
+    open(1, file = 'Morse.dat')
+    write(1,*) xtime, qi(1), qi(2)
+
+    ! Calculate initial energy
+    Ti = sum(momentumi**2/(2*mass))
+    do j = 1,nop
+        do i = j+1,nop
+            Vtoti = Vtoti + V(r(i,j))
+        enddo
+    enddo
+
     ! Integration loop:
     call algini                      ! First call
     intloop: do nn = 2, ncall
        call algrun ! Other calls
-       write(102,*) xtime !write all other times
      enddo intloop
 
-    ! End check (only first coordinate pair) :
-    tf = ncall*xdt
-    qf = xq(1)
-    pf = xq(qdim+1)
-    phif = atan2(pf,qf)
-    ef = qf*qf+pf*pf
-    write (*,*) "tf-2pi:    ", tf - 2.0_mk*pi
-    write (*,*) "Ef-E0:     ", ef - 1.0_mk
-    write (*,*) "qf-1:      ", qf - 1.0_mk
-    write (*,*) "pf:        ", pf
-    write (*,*) "phif(deg): ", phif*180.0_mk/pi
+    ! End check :
+    !tf = ncall*xdt
+    !qf = xq(1);
+    !pf = xq(qdim+1)
+    !phif = atan2(pf,qf)
+    !Check Meyer energy conservation
+    T = sum(xq(qdim+1:qdim+dof)**2/(2*mass))
+    do j = 1,nop
+        do i = j+1,nop
+            Vtot = Vtot + V(r(i,j))
+        enddo
+    enddo
+    ef = T + Vtot
+    !write(*,*) "T: ", T, "Vtot: ", Vtot
 
-    write (9,*) "tf-2pi:    ", tf - 2.0_mk*pi
-    write (9,*) "Ef-E0:     ", ef - 1.0_mk
-    write (9,*) "qf-1:      ", qf - 1.0_mk
-    write (9,*) "pf:        ", pf
-    write (9,*) "phif(deg): ", phif*180.0_mk/pi
+    !write(*,*) r(1,2)
+
+    !normv0 = sqrt(sum(vqi**2)+sum(vmomentumi**2))
+    !write (*,*) "tf-2pi:    ", tf - 2.0_mk*pi
+    !write(*,*) "fv: ",fv
+    !write (*,*) "Ef:   ", ef, "Ei:    ", ei
+    !write (*,*) "Ef-E0:     ", ef - ei
+    !write (*,*) "qf-1:      ", qf - 1.0_mk
+    !write (*,*) "pf:        ", pf
+    !write (*,*) "phif(deg): ", phif*180.0_mk/pi
+
+    !write (9,*) "tf-2pi:    ", tf - 2.0_mk*pi
+    !write (9,*) "Ef-E0:     ", ef - 1.0_mk
+    !write (9,*) "qf-1:      ", qf - 1.0_mk
+    !write (9,*) "pf:        ", pf
+    !write (9,*) "phif(deg): ", phif*180.0_mk/pi
     call date_and_time(values=vals)
-    write (9,*) vals(1:3), "  ", vals(5:8) 
-    write (9,*)
+    !write (9,*) vals(1:3), "  ", vals(5:8) 
+    !write (9,*)
 
-    CLOSE (9)
+    !CLOSE (9)
+    close (1)
 
   end program testsymp
 
@@ -271,16 +324,17 @@
     use coefficients, only : typ =>typ8c, nc => nc8c, ai => ai8c
 
     ! Exchange of parameters and coordinates with other program units:
-    use coordinates,  only : mk, qdim, dof, d, xq, fv, xtime, xdt
+    use coordinates
 
     implicit none
 
     integer :: nn, ii
+    real (kind = mk) normv, normv0
 
     real (kind = mk), dimension (0:2*nc) :: hhc
     real (kind = mk), dimension (1:2*qdim) :: xqh, fvh
 
-    external pots1, pots2
+    external pots1, potsMorse2
 
     entry algini
 
@@ -305,7 +359,7 @@
           call pots1      ! dT/dp
           fvh(1:qdim) = fvh(1:qdim) + fv(qdim+1:2*qdim)*hhc(ii)
           xq(1:qdim) = xqh(1:qdim) + fvh(1:qdim)
-          call pots2     ! -dV/dq
+          call potsMorse2     ! -dV/dq
           fvh((qdim+1):2*qdim)=fvh((qdim+1):2*qdim)+fv(1:qdim)*hhc(ii+1)
           xq( qdim+1:2*qdim) = xqh( qdim+1:2*qdim) + fvh( qdim+1:2*qdim)
        enddo
@@ -315,56 +369,180 @@
     else  choice                    ! Choose algorithm: typ = 2
 
        do ii = 0, 2*nc-2, 2
-          call pots2  ! -dV/dq
+          call potsMorse2  ! -dV/dq
           fvh( qdim+1:2*qdim) = fvh( qdim+1:2*qdim) + fv(1:qdim)*hhc(ii)
           xq( qdim+1:2*qdim) = xqh( qdim+1:2*qdim) + fvh( qdim+1:2*qdim)
           call pots1   ! dT/dp
           fvh(1:qdim) = fvh(1:qdim) + fv(qdim+1:2*qdim)*hhc(ii+1)
           xq(1:qdim) = xqh(1:qdim) + fvh(1:qdim)
        enddo
-       call pots2  ! -dV/dq
+       call potsMorse2  ! -dV/dq
        fvh(qdim+1:2*qdim) = fvh(qdim+1:2*qdim) + fv(1:qdim)*hhc(2*nc)
 
     endif choice
 
     xq(1:2*qdim) = xqh(1:2*qdim) + fvh(1:2*qdim)
     xtime = xtime + xdt
-    ! Write out the trajectory
-    write(102,*) xq(1:dof), xq(qdim+1:qdim+dof) 
 
+    ! Calculate Lyapunov Indicator
+    !normv0 = sqrt(vqi(1)**2+vqi(2)**2+vmomentumi(1)**2+vmomentumi(2)**2)
+    !normv = sqrt(xq(3)**2+xq(4)**2+xq(7)**2+xq(8)**2)
+    !FLI = log(normv/normv0)/xtime
+    write(1,*) xtime, xq(1), xq(2) 
     return
   end subroutine algo12
 
   !----------------------------------------------------------------------
 
-  ! Subroutines for the "right sides" of the harmonic oscillator with
-  ! unit frequency:
-
-  subroutine pots1        ! dH/dp and dK/dvp
-    use coordinates, only : mk, dof, nop, d, qdim, xq, fv, mi, d
-    implicit none
-    integer i
-    real (kind = mk), dimension(1:dof) :: m = 0.0_mk
-    do i = 1,nop
-        m((i-1)*d+1:i*d) = mi(i) 
-    enddo
-    !Define the xdots = dH/dp = p/m
-    fv(qdim+1:qdim+dof) = xq(qdim+1:qdim+dof)/m
-    !Define the v_xdots = dK/dvp = v_p/m
-    fv(qdim+dof+1:2*qdim) = xq(qdim+dof+1:2*qdim)/m    
+  ! Subroutine for the p derivatives of a well behaved Hamiltonian
+  subroutine pots1        ! qdots and v_qdots
+    use coordinates
+    call masses
+    fv(qdim+1:qdim+dof) = xq(qdim+1:qdim+dof)/mass !qdot = dH/dp = p/m
+    fv(qdim+dof+1:2*qdim) = xq(qdim+dof+1:2*qdim)/mass !v_qdot = dK/dv_p = v_p*d2H/dp2 = v_p/m
     return
   end subroutine pots1
 
-  subroutine pots2       ! -dH/dx and -dK/dvx
-    use coordinates,  only : mk, dof, nop, d, qdim, xq, fv, mi, d
+  !Subroutine for the Morse potential for n particles
+    subroutine potsMorse2
+    use coordinates
     implicit none
-    integer i
-    real (kind = mk), dimension(1:dof) :: m = 0.0_mk
-    do i = 1,nop
-        m((i-1)*d+1:i*d) = mi(i)
+    real (kind = mk), external :: r, V, dVdr, d2Vdr2, dVextdx, d2Vextdx2
+    integer, external :: vectpos
+    real (kind = mk), dimension(1:nop) :: jsum, lsum, intsum = 0.0_mk
+    integer :: n,j,m,k,o,l !j,k and l are particle numbers, m and o are coordinate numbers and n is  the position in the phase space-vector
+    call masses
+
+    ! Calculate all the pdots
+    do n = 1,dof
+       call indicies(n,m,k)
+       do j = 1,nop !consider interaction with each other particle
+          intsum(j) = -dVdr(r(k,j))*(xq(vectpos(m,k))-xq(vectpos(m,j)))/r(k,j)
+          intsum(k) = 0.0_mk !except the kth particle
+       enddo
+       fv(n) = sum(intsum) - dVextdx(xq(n)) !sum over all particles (execpt kth)
     enddo
-    fv(1:dof) = -xq(1:dof)*m !Define the pdots = -dH/dx = -x*m
-    fv(dof+1:qdim) = -xq(dof+1:qdim)*m !Define the vpdots = -dK/dvx = -v_x*d^2H/dx^2 = -v_x*m
+
+    ! Calculate all the v_pdots
+    do n = dof+1,qdim
+        call indicies(n-dof,m,k)
+        do o = 1,d
+           do j = 1, nop
+              jsum(j) = d2Vdr2(r(k,j))*(xq(vectpos(m,k))-xq(vectpos(m,j)))*(xq(vectpos(o,k))-xq(vectpos(o,j)))/r(k,j)**2
+              jsum(k) = 0.0_mk
+           enddo
+           do l = 1,nop
+              lsum(l) = d2Vdr2(r(l,k))*(xq(vectpos(m,l))-xq(vectpos(m,k)))*(xq(vectpos(o,k))-xq(vectpos(o,l)))/r(l,k)**2
+              lsum(k) = 0.0_mk
+           enddo
+           intsum(o) = -xq(vectpos(o,k)+dof)*sum(jsum)-sum(lsum)
+        enddo
+        fv(n) = sum(intsum) - d2Vextdx2(xq(n-dof))
+    enddo
+    return
+  end subroutine potsMorse2
+
+  !Subroutine for the Harmonic oscillator potential
+  subroutine pots2       ! pdots and v_pdots
+    use coordinates
+    call masses
+    fv(1:dof) = -xq(1:dof)*mass !pdot = -dH/dq = -q*m
+    fv(dof+1:qdim) = -xq(dof+1:qdim)*mass !v_pdot = -dK/dv_q = -v_q*d2H/dq2 = -v_q*m
     return
   end subroutine pots2
-!  ****
+
+  !Subroutines for the Meyer Hamiltonian
+  subroutine potsMeyer2
+    use coordinates     ! pdots and v_pdots 
+    fv(1) = -(xq(1)+8*kMeyer*xq(1)*xq(2)**2) !p1dot = -(q1 + 8*k*q1*q2^2)
+    fv(2) = -(xq(2)+8*kMeyer*xq(2)*xq(1)**2) !p2dot = -(q2 + 8*k*q2*q1^2)
+    fv(3) = -xq(3)*(1+8*kMeyer*xq(2)**2)-xq(4)*16*kMeyer*xq(1)*xq(2) !v_p1dot = -vq1(16*k*q1*q2)-vq2(1+8*kq2^2)
+    fv(4) = -xq(4)*(1+8*kMeyer*xq(1)**2)-xq(3)*16*kMeyer*xq(1)*xq(2) !v_p2dot = -vq1(1+8*kq1^2)-vq2(16*k*q1*q2)
+  end subroutine potsMeyer2
+
+  ! Function to compute separation distance between the ith and jth particles
+  function r(i,j)
+    use coordinates
+    implicit none
+    integer, intent(in) :: i, j
+    real (kind = mk) :: r
+    r = sqrt(sum((xq((i-1)*d+1:i*d)-xq((j-1)*d+1:j*d))**2))
+  end function
+
+  ! Functions to return the values of the Morse Potential and its derivatives
+  function V(sep)
+    use coordinates
+    implicit none
+    real (kind = mk), intent(in) :: sep
+    real (kind = mk) :: V
+    V = 0.5_mk*sep**2 
+    !V = De*(exp(-2*a*(sep-re))-2*exp(-a*(sep-re)))
+  end function
+
+  function dVdr(sep)
+    use coordinates
+    implicit none
+    real (kind = mk), intent(in) :: sep
+    real (kind = mk) :: dVdr
+    dVdr = sep
+    !dVdr = De*(-2*a*exp(-2*a*(sep-re))+2*a*exp(-a*(sep-re)))
+  end function
+
+  function d2Vdr2(sep)
+    use coordinates
+    implicit none
+    real (kind = mk), intent(in) :: sep
+    real (kind = mk) :: d2Vdr2
+    d2Vdr2 = 1.0_mk
+    !d2Vdr2 = De*(4*a**2*exp(-2*a*(sep-re))-2*a**2*exp(-a*(sep-re)))
+  end function
+
+  ! Functions to return values of external potential (like a harm osc trap)
+  function Vext(x)
+    use coordinates
+    implicit none
+    real (kind = mk), intent(in) :: x
+    real (kind = mk) :: Vext
+    Vext = 0.5_mk*kext*x**2
+  end function
+
+  function dVextdx(x)
+    use coordinates
+    implicit none
+    real (kind = mk), intent(in) :: x
+    real (kind = mk) :: dVextdx
+    dVextdx = x*kext
+  end function
+
+  function d2Vextdx2(x)
+    use coordinates
+    implicit none
+    real (kind = mk), intent(in) :: x
+    real (kind = mk) :: d2Vextdx2
+    d2Vextdx2 = kext*1.0_mk
+  end function
+
+  ! Function which returns the coordinate number and particle number based on the position in the 
+  ! phase-space vector
+  subroutine indicies(n, coordnum, partnum)
+    use coordinates
+    implicit none
+    integer, intent(in) :: n
+    integer, intent(out) :: partnum, coordnum
+    partnum = n/d + 1
+    coordnum = mod(n,d)
+    if (coordnum == 0) then
+            coordnum = d
+            partnum = partnum-1
+    end if
+  end subroutine indicies
+
+  ! Function which returns the position in the phase-space vector as a function of particle and 
+  ! coordinate numbers
+  function vectpos(coordnum,partnum)
+    use coordinates
+    implicit none
+    integer, intent(in) :: coordnum, partnum
+    integer :: vectpos
+    vectpos = d*(partnum-1)+coordnum
+  end function 

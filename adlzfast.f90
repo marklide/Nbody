@@ -31,9 +31,9 @@
     implicit none
 
     !     Select double or quadruple precision here:
-         !integer, parameter :: mk = 16
+         integer, parameter :: mk = 16
     
-         integer, parameter :: mk = 8
+         !integer, parameter :: mk = 8
 
     !     Dimension of problem is defined here:
     integer, parameter :: d = 1
@@ -87,7 +87,7 @@
     real (kind = mk) :: hypraddot = -0.001_mk
     real (kind = mk) :: hypangdot = 0.0_mk
     real (kind = mk) :: KEy1 = 0.0_mk !Enter energies in nK
-    real (kind = mk) :: KEy2 = 1e10_mk
+    real (kind = mk) :: KEy2 = 1e8_mk
     real (kind = mk) :: eps = 0.0_mk
     real (kind = mk), dimension(:), allocatable :: radvec, radmax
     logical, dimension(:), allocatable :: rchoose
@@ -110,7 +110,7 @@
     ! Define which particle is which
     integer, dimension(1:nop) :: partkind 
     integer :: coltype
-    integer :: count12, count13, count23, countind, numcols, eps1, angstep, laststep
+    integer :: count12, count13, count23, countind, eps1, angstep, laststep
 
     ! Define Initial conditions
     real(kind = mk), dimension(1:dof) :: qi = 0.0_mk
@@ -120,11 +120,12 @@
 
     ! Define coordinates and energies to be defined later
     real (kind = mk) :: tf, ef, normv, xcm, y1, y2, normv0, y1dot, y2dot, &
-         Ptoti, Ptot, E, T, Vtot, theta13, theta12, theta23, ang1, ang2 = 0.0_mk
+         Ptoti, Ptot, E, T,deltaAngle, Vtot, theta13, theta12, theta23, ang1, ang2, wellBottom = 0.0_mk
 
     ! For RNG
-    integer, parameter :: rngsize = 1000
-    double precision :: rngvec(rngsize*2)
+    integer, parameter :: numcols = 1
+    integer :: rngsize = 10
+    double precision :: rngvec(numcols)
     real (kind = mk) :: rvec(size(rngvec))
     real (kind = mk), dimension(:), allocatable :: rvecselect
 
@@ -149,6 +150,7 @@
                 mu12 = (mi(1)*mi(2))/(mi(1) + mi(2))
                 mu123 = (mi(1) + mi(2))*mi(3)/Mtot
                 mu = sqrt(mu12*mu123)
+                !mu = (mi(1)*mi(2)*mi(3))**(1.0_mk/3.0_mk)
                 mu23 = (mi(2) + mi(3))/(mi(2)*mi(3))
                 muKRb = mPotas*mRb/(mPotas + mRb) 
     
@@ -167,6 +169,11 @@
                 aK2 = 0.3639!omegaK2*sqrt((mPotas*meperamu/2.0_mk)/(2.0_mk*DeK2))
                 aKRb = 0.3898!omegaKRb*sqrt((muKRb*meperamu)/(2.0_mk*DeKRb))
                 aRb2 = omegaRb2*sqrt((mRb*meperamu/2.0_mk)/(2.0_mk*DeRb2))
+                !aK2 = 1.0_mk/reK2
+                !aKRb = 1.0_mk/reKRb
+                !aRb2 = 1.0_mk/reRb2
+
+                wellBottom = acos(sqrt(mu12/mu)*reKRb/100.0_mk)
  
             end subroutine masses
 
@@ -309,7 +316,7 @@
     integer :: vals(1:8)
     integer :: i,j,m,k,l,jj
     
-    real(kind = mk) :: Vtoti, Ei, Ti = 0.0_mk
+    real(kind = mk) :: Vtoti, Ei, Ti, tFreeMu, tFreeMu123 = 0.0_mk
 
     external pots1, potsMeyer2
     integer, external :: vectpos
@@ -317,38 +324,42 @@
     call CPU_time(start)
     call masses
 
+    call potmap
     ! Input of stepsize:
     !write (*,*) "Total time length: "
     !read  (*,*) tf
     !write (*,*) "Step size: "
     !read (*,*) xdt
-    tf = 400000000_mk
-    !do jj = 0,2
-    xdt = 100!**real(jj,mk)
+    tf = 200000000_mk
+    do jj = 0,0
+    xdt = 202.0_mk !+ 25.0_mk*real(jj,mk)
     write(*,*)"xdt:",  xdt
     ncall = int(tf/xdt)
 
+    write(*,*) "ncall: ", ncall
     write(*,*) "weK2", omegaK2,"weRb2", omegaRb2, "weKRB", omegaKRb
     write(*,*) "aKRb: ", aKRb, "aK2: ", aK2, "aRb2", aRb2
-    !write(*,*) theta13, theta23
-    ! Create array of ran nums for hypang int condit
-    !call rgnf_lux(rngvec,rngsize*2)
-    !rvec = real(rngvec,mk)*0.001_mk 
-    !do i = 1, size(rvec)
-    !eps = rvec(i)
+    write(*,*) theta13, theta23
     write(*,*) "The final time: ", tf*secperatu*1e9_mk
-    ang1 = 1.4858642565_mk
+    write(*,*) "wellBottom angle: ", wellBottom
+    !ang1 = 1.4858642565_mk
     ang2 = 1.5015699085_mk
-    !ang1 = 0.5566701165_mk
-    !ang2 = 0.5697164945_mk
-    numcols = 1!00
+    deltaAngle = ((1.5015699085_mk-1.4858642565_mk)/2.0_mk)*(99.0_mk/100.0_mk)
+    ang1 = 1.4858642565_mk + deltaAngle
+    ang2 = 1.5015699085_mk - deltaAngle
+    write(*,*) ang1, ang2
+    write(*,*) deltaAngle
+    write (*,*) "Delta ang: ", (ang2-ang1)
     call rgnf_lux(rngvec,numcols)
     rngvec = rngvec*(ang2-ang1)+ang1
-    !allocate(Vpoints(ncall)) 
-    !numcols = 5697-5567+1
-    angstep = 15705652
+    !write(*,*) rngvec
+    do i = 1,numcols
+       rngvec(i) = wellBottom!*0.99_mk!ang1+(ang2-ang1)/real(numcols,mk)*(real(i,mk)-1.0_mk)
+    enddo
+    !write(*,*) rngvec
     count12 = 0
-    do j = 0, 0 ! Loop for order of magnitude of energy
+    do j = 0,0 !Loop for order of magnitude of energy
+    !j = 8
     k = 1
     write(*,*) "j: ", j
     do m = 1,1
@@ -356,6 +367,7 @@
     count23 = 0
     countind = 0
     allocate(coltimes(numcols))
+    write(*,*) "t_0 = ", coltimes(i)
     do i = 1, numcols
     !Vpoints = 0.0_mk
     hypang = rngvec(i)
@@ -366,8 +378,8 @@
     armtime = 0.0_mk
     xtime = 0.0_mk
     hyprad = 100.0_mk
-    KEy2 = 1e6_mk!(1.0_mk + real(j,mk)*10.0_mk)*1e7_mk
-   ! KEy2 = (10**(real(j,mk)))/real(m,mk)
+    !KEy2 = 1e10_mk!(1.0_mk + real(j,mk)*10.0_mk)*1e7_mk
+    KEy2 = 1e10_mk + real(j,mk)*1e8_mk!(10**(real(j,mk)))/real(m,mk) ! in nanoKelvin
    ! allocate (radvec(ncall),rtimestemp(ncall),rchoose(ncall))
    ! radvec(1) = hyprad
 
@@ -389,19 +401,14 @@
     momentumi(1) = mi(1)*sqrt(mu)*(sqrt(mu12)*y1dot/mi(1) + sqrt(mu123)*y2dot/(mi(1)+mi(2)))
     momentumi(2) = mi(2)*sqrt(mu)*(-sqrt(mu12)*y1dot/mi(2) + sqrt(mu123)*y2dot/(mi(1)+mi(2)))
     momentumi(3) = -sqrt(mu*mu123)*y2dot
-    !Ptoti = momentumi(1)+momentumi(2)+momentumi(3)
-    !write(*,*) 'Ptot: ', Ptoti
-    !momentumi(1) = momentumi(1) - (mi(1)/Mtot)*Ptot
-    !momentumi(2) = momentumi(2) - (mi(2)/Mtot)*Ptot
-    !momentumi(3) = momentumi(3) - (mi(3)/Mtot)*Ptot
-    !Ptot = momentumi(1)+momentumi(2)+momentumi(3)
-    !write(*,*) 'Ptot new: ', Ptot
     xq(qdim+1:2*qdim) = momentumi !p's
-    call energy
+
+    call energy !in Hartree
     ei = E
     Ti = T
     Vtoti = Vtot
     write(102,*) abs(xq(1)-xq(2)), Vtoti
+    write(*,*) 'KEy2: ', KEy2
     write(*,*) 'Ei1: ', Ei, 'Ti1: ', Ti, 'Vtoti1: ', Vtoti
 
 !    call fstfwrd
@@ -445,7 +452,7 @@
     open(2, file = 'energy.dat')
     open(3, file = 'Jacobi.dat')
     open(4, file = 'radmax.dat')
-    write(3,*) y1, y2, 0
+    !write(3,*) y1, y2, 0
 !    write(*,*) 'Xcm: ', xcm
 
     ! Calculate initial energy
@@ -462,8 +469,6 @@
        call algrun ! Other calls
        if ((sqrt(y1**2 + y2**2) > cutoffrad)) then
                exit
-       !else if (sqrt(y1**2 + y2**2) > 75) then
-               
        endif
    !    radvec(nn) = sqrt(y1**2 + y2**2)
      enddo intloop
@@ -478,27 +483,39 @@
     hyprad = sqrt(y1**2 + y2**2)
 
     ! Determine exit channel
-!    if (abs(y1) < 30.0_mk) then 
-!            write(*,*) '1-2 dimer was formed.'
-!            coltype = 1
-!             count12 = count12 + 1
-!    else if ( (hypang<(theta13+15.0/hyprad)).AND.(hypang>(theta13-15.0_mk/hyprad)) ) then
-!            write(*,*) '1-3 dimer was formed.'
-!            coltype = 2
-!             count13 = count13 + 1
-!    else if ( (hypang<(theta23+15.0/hyprad)).AND.(hypang>(theta23-15.0_mk/hyprad)) ) then
-!            write(*,*) '2-3 dimer was formed.'
-!            coltype = 3
-!             count23 = count23 + 1
-!    else
-!            write(*,*) 'Result was indeterminate.'
-!            coltype = 4
-!             countind = countind + 1
-!    endif
-
-    if (hyprad < 150_mk) then
-            count12 = count12 + 1
+    if ((abs(y1) < 30.0_mk).AND.(y1 >= 0.0_mk)) then 
+            write(*,*) '1-2 dimer was formed (right).'
+            coltype = 1
+             count12 = count12 + 1
+    else if ((abs(y1) < 30.0_mk).AND.(y1 <= 0.0_mk)) then
+            write(*,*) '1-2 dimer was formed (left).'
+            coltype = 2
+             count12 = count12 + 1
+    else if ( (hypang<(theta13+15.0/hyprad)).AND.(hypang>(theta13-15.0_mk/hyprad)) ) then
+            write(*,*) '1-3 dimer was formed (right).'
+            coltype = 3
+             count13 = count13 + 1
+    else if ( (hypang<(-theta13+15.0/hyprad)).AND.(hypang>(-theta13-15.0_mk/hyprad)) ) then
+            write(*,*) '1-3 dimer was formed (left).'
+            coltype = 4
+             count13 = count13 + 1
+    else if ( (hypang<(theta23+15.0/hyprad)).AND.(hypang>(theta23-15.0_mk/hyprad)) ) then
+            write(*,*) '2-3 dimer was formed (right).'
+            coltype = 5
+             count23 = count23 + 1
+    else if ( (hypang<(-theta23+15.0/hyprad)).AND.(hypang>(-theta23-15.0_mk/hyprad)) ) then
+            write(*,*) '2-3 dimer was formed (left).'
+            coltype = 6
+             count23 = count23 + 1
+    else
+            write(*,*) 'Result was indeterminate.'
+            coltype = 7
+             countind = countind + 1
     endif
+
+    !if (hyprad < 150_mk) then
+    !        count12 = count12 + 1
+    !endif
     !call rcheck
 
     !do j = 1,size(radvec)
@@ -517,19 +534,28 @@
     !      exit
     !   endif
     !enddo
-    write(2,*) hypangint, Vtoti, xtime*secperatu*1e9_mk
+    !write(2,*) KEy2, xtime*secperatu*1e9_mk
     call energy
     write(*,*) 'coltimes(i):  ', coltimes(i)
+    !write(1,*) xdt, coltimes(i)
     write(*,*) "Ei - Ef: ", ei - E 
+    write(3,*) hypangint, coltimes(i), KEy2*1e-9_mk, coltype
     enddo
 !    write(*,*) count12, count13, count23, countind
 !    write(1,*) KEy2, real(count12,mk)/101.0_mk, real(count13,mk)/101.0_mk, &
 !          &  real(count23,mk)/101.0_mk, real(countind,mk)/101.0_mk
+
+    !tFreeMu = (cutoffrad+100.0_mk)*sqrt(mu/(2.0_mk*KEy2/nanoKperEh))*secperatu*1e9_mk
+    tFreeMu123 = (cutoffrad+100.0_mk)*sqrt(mu123/(2.0_mk*KEy2/nanoKperEh))*secperatu*1e9_mk
+
     write(*,*) "The collision energy in K is: ", KEy2*1e-9_mk
+    !write(*,*) "tFreeMu: ", tFreeMu
+    write(*,*) "tFreeMu123: ", tFreeMu123
     write(*,*) "The average collision time is: ", sum(coltimes)/real(size(coltimes),mk)
+    write(2,*) KEy2*1e-9_mk, sum(coltimes)/real(size(coltimes),mk)!, tFreeMu123
     !write(*,*) count12, count13, count23, countind
     deallocate(coltimes)
-    !enddo
+    enddo
     enddo
     enddo
     !call potmap
@@ -542,12 +568,12 @@
 !    write(*,*) maxval(Vpoints),maxloc(Vpoints)
 
     ! Create plots of the potentials
-    do k = 0,1000
+    !do k = 0,1000
        !write(102,*) real(k,mk)/10_mk, V(real(k,mk)/10_mk,DeK2,reK2,aK2)
-       write(103,*) real(k,mk)/10_mk, V(real(k,mk)/10_mk,DeKRb,reKRb,aKRb)
-    enddo
+    !   write(103,*) real(k,mk)/10_mk, V(real(k,mk)/10_mk,DeKRb,reKRb,aKRb)
+    !enddo
 
-    write(*,*) "Number of traj's that maxed out: ", count12
+    write(*,*) "Number of traj's that maxed out: ", countind
     close (1)
     close (2)
     close (3)
@@ -558,6 +584,7 @@
 
   !----------------------------------------------------------------------
 
+  
   subroutine algo12
 
     ! This subroutine performs one full integration step.
@@ -638,7 +665,7 @@
 
     ! Caclulate Jacobi Coordinates
     call Jacobi
-    call Energy
+    call energy
     !Vpoints(nn) = Vtot
 
     ! Output results
@@ -648,8 +675,8 @@
     !write(103,*) xq(3), 0, 0, 'i'
  
     !write(1,*) xtime*secperatu*1e9_mk, sqrt(y1**2 + y2**2)
-    !--------------!!!!! Turn this one on for using pot.gnu !!!!!------------------
-!    write(3,*) y1, y2, 0
+    !-----------------!!!!! Turn this one on for using pot.gnu !!!!!------------------
+    write(1,*) y1, y2, 0
     !write(102,*) xtime*secperatu*1e9_mk, Vpoints(nn)
     !write(4,*) xtime, y2, y1*cos(theta23)+y2*sin(theta23), sqrt(y1**2 + y2**2)
     return
@@ -920,11 +947,11 @@
         write(4,*)
     enddo
     do i = -5*1571,5*1571
-       x1 = sqrt(mu)*100_mk*(sqrt(mu12)*cos(real(i,mk)/5e3_mk)/mi(1) + &
+       x1 = sqrt(mu)*74.62_mk*(sqrt(mu12)*cos(real(i,mk)/5e3_mk)/mi(1) + &
                sqrt(mu123)*sin(real(i,mk)/5e3_mk)/(mi(1)+mi(2)))
-       x2 = sqrt(mu)*100_mk*(-sqrt(mu12)*cos(real(i,mk)/5e3_mk)/mi(2) + &
+       x2 = sqrt(mu)*74.62_mk*(-sqrt(mu12)*cos(real(i,mk)/5e3_mk)/mi(2) + &
                     sqrt(mu123)*sin(real(i,mk)/5e3_mk)/(mi(1)+mi(2)))
-       x3 = sqrt(mu)*100_mk*(-sqrt(mu123)*sin(real(i,mk)/5e3_mk)/mi(3))
+       x3 = sqrt(mu)*74.62_mk*(-sqrt(mu123)*sin(real(i,mk)/5e3_mk)/mi(3))
        r12 = abs(x1 - x2)
        r13 = abs(x1 - x3)
        r23 = abs(x2 - x3)
@@ -932,7 +959,7 @@
        V13 = V(r13,De(1,3),re(1,3),apar(1,3))
        V23 = V(r23,De(2,3),re(2,3),apar(2,3))
        Vtot = V12 + V13 + V23
-       write(2,*) real(i,mk)/5e3_mk,  Vtot
+       write(107,*) real(i,mk)/5e3_mk,  Vtot
     enddo
     return
     end subroutine potmap

@@ -31,12 +31,13 @@
     implicit none
 
     !     Select double or quadruple precision here:
-    !     integer, parameter :: mk = 16
-    integer, parameter :: mk = 8
+         integer, parameter :: mk = 16
+    
+         !integer, parameter :: mk = 8
 
     !     Dimension of problem is defined here:
-    integer, parameter :: d = 2
-    integer, parameter :: nop = 1
+    integer, parameter :: d = 1
+    integer, parameter :: nop = 3
     integer, parameter :: dof = nop*d
     integer, parameter :: qdim = dof*2
 
@@ -44,34 +45,109 @@
     real (kind = mk), dimension (1:2*qdim) :: xq
     real (kind = mk), dimension (1:2*qdim) :: fv = 0.0_mk
     ! Time and time step
-    real (kind = mk) :: xtime, xdt
+    real (kind = mk) :: xtime, xdt, armtime
+
+    ! Conversion Factors
+    real (kind = mk) :: meperamu = 1822.89_mk
+    real (kind = mk) :: hartperinvcm = 4.55633525291e-6_mk
+    real (kind = mk) :: angsperbohr = 0.529177249_mk
+    real (kind = mk) :: nanoKperEh = 3.15775024804e14_mk
+    real (kind = mk) :: secperatu =  2.41888432658e-17_mk
+    real (kind = mk) :: Hzperinvcm = 2.99792458e6_mk
+
+    ! Paramters of the Potentials
+    real (kind = mk) :: kMeyer = 1.0_mk !Meyer potential mixing coeffecient
+    real (kind = mk) :: omegaext = 0.0000_mk !Spring coeffecient for external harm osc trap (in Kelvin/Angs^2)
+    ! Dissociation Energies in cm^-1 (converted to E_h)
+    real (kind = mk) :: DeK2 = 4405.389_mk*4.55633525291e-6_mk
+    real (kind = mk) :: DeRb2 = 3965.8_mk*4.55633525291e-6_mk
+    real (kind = mk) :: DeKRb = 4180.417_mk*4.55633525291e-6_mk
+    ! Equilibrium Distances in Angstroms
+    real (kind = mk) :: reK2 = 3.956_mk/0.529177249_mk
+    real (kind = mk) :: reRb2 = 4.233_mk/0.529177249_mk
+    real (kind = mk) :: reKRb = 4.160_mk/0.529177249_mk
+    !real (kind = mk) :: apar = 1.0_mk !in Bohr
+    real (kind = mk) :: omegaK2cm = 92.021_mk !in cm^-1
+    real (kind = mk) :: omegaKRBcm = 75.5_mk
+    real (kind = mk) :: omegaRb2cm = 57.31_mk
+    real (kind = mk) :: aK2 = 1.0_mk !in Bohr^(-1)
+    real (kind = mk) :: aKRb = 1.0_mk
+    real (kind = mk) :: aRb2 = 1.0_mk
+    real (kind = mk) :: omegaK2, omegaKRb, omegaRb2
+
+    ! Jacobi Polar Coordinates
+    real (kind = mk) :: radcutoff = 150.0_mk
+    real (kind = mk) :: hyprad = 100.0_mk
+    real (kind = mk) :: hypang = 0.0_mk
+    real (kind = mk) :: hypraddot = -0.001_mk
+    real (kind = mk) :: hypangdot = 0.0_mk
+    real (kind = mk) :: KEy1 = 0.0_mk !Enter energies in nK
+    real (kind = mk) :: KEy2 = 1e9_mk
+    real (kind = mk) :: eps = 0.0_mk
 
     ! Masses
+    real (kind = mk), dimension (1:nop) :: miamu = 1.0_mk
     real (kind = mk), dimension (1:nop) :: mi = 1.0_mk
-    real (kind = mk), dimension (1:dof) :: mass = 0.0_mk
+    real (kind = mk), dimension (1:dof) :: mass = 1.0_mk
+    real (kind = mk) :: Mtot, mu, mu12, mu123
+    real (kind = mk) :: mPotas = 39.0983_mk
+    real (kind = mk) :: mRb = 85.4678_mk
 
-    !Fast Lyapunov Indicator
-    real (kind = mk) :: FLI 
+    ! Fast Lyapunov Indicator
+    real (kind = mk) :: FLI, start, finish 
 
-    ! Constants for potentials
-    real (kind = mk) :: De = 1.0_mk
-    real (kind = mk) :: a = 1.0_mk
-    real (kind = mk) :: re = 1.0_mk
-    real (kind = mk) :: kMeyer = 1.0_mk !Meyer potential mixing coeffecient
-    !integer :: i, j
+    ! Define which particle is which
+    integer, dimension(1:nop) :: partkind 
 
-    !Define Initial conditions
+    ! Define Initial conditions
     real(kind = mk), dimension(1:dof) :: qi = 0.0_mk
     real(kind = mk), dimension(1:dof) :: vqi = 0.0_mk
     real(kind = mk), dimension(1:dof) :: momentumi = 0.0_mk
     real(kind = mk), dimension(1:dof) :: vmomentumi = 0.0_mk
 
+    ! Define coordinates and energies to be defined later
+    real (kind = mk) :: tf, ef, normv, xcm, y1, y2, normv0, y1dot, y2dot, &
+         Ptoti, Ptot, E, T, Vtot, theta13, theta12, theta23, KRbfreq, wellBottom = 0.0_mk
+    integer :: count12, count13, count23, countind, coltype
+
+    ! For RNG
+    integer, parameter :: rngsize = 5000
+    double precision :: rngvec(rngsize*2)
+    real (kind = mk), dimension(:), allocatable :: rvecselect
+
+    ! For gaussian
+    real (kind = mk) :: agauss = 1.0_mk, bgauss = 0.0_mk, cgauss = 1.0_mk
+
     contains
             subroutine masses
                 integer i
-                do i =1,nop
+                partkind = (/1, 0, 0/) !1 for Rubidium, 0 for Potassium
+                
+                ! Assign masses based on particle type
+                do i = 1,nop
+                        if (partkind(i) == 0) then
+                                mi(i) = mPotas*meperamu
+                        else
+                                mi(i) = mRb*meperamu
+                        endif
                         mass((i-1)*d+1:i*d) = mi(i)
                 enddo
+                Mtot = mi(1) + mi(2) + mi(3)
+                mu12 = (mi(1)*mi(2))/(mi(1) + mi(2))
+                mu123 = (mi(1) + mi(2))*mi(3)/Mtot
+                mu = sqrt(mu12*mu123)
+                omegaK2 = omegaK2cm*Hzperinvcm*secperatu
+                omegaKRb = omegaKRbcm*Hzperinvcm*secperatu
+                omegaRb2 = omegaRb2cm*Hzperinvcm*secperatu
+                aK2 = 0.3639!omegaK2*sqrt((mPotas*meperamu/2.0_mk)/(2.0_mk*DeK2))
+                aKRb = 0.3898!omegaKRb*sqrt((muKRb*meperamu)/(2.0_mk*DeKRb))
+                aRb2 = omegaRb2*sqrt((mRb*meperamu/2.0_mk)/(2.0_mk*DeRb2))
+                
+                wellBottom = acos(sqrt(mu12/mu)*reKRb/100.0_mk)
+    
+                theta13 = atan(-mu/mi(1))
+                theta23 = atan(mu/mi(2))
+            
             end subroutine masses
 
   end module coordinates
@@ -212,80 +288,208 @@
 
     integer :: vals(1:8)
     INTEGER(KIND=4) :: nn, ncall
-    real(kind = mk) :: oscs = 0.0_mk
+    integer :: i,j,m,k
     
     real(kind=mk), parameter ::                                       &
          & pi = 3.1415926535897932384626433832795029_mk
-    real(kind = mk) :: qf, pf, phif, tf, ef, ei, normv, normv0
+ 
+    real(kind = mk) :: Vtoti, Ei, Ti = 0.0_mk
 
     external pots1, potsMeyer2
+    integer, external :: vectpos
+    real (kind = mk), external :: r, V, dVdr, d2Vdr2, Vext, dVextdx, d2Vextdx2, De, re, apar
+    call CPU_time(start)
+    call masses
 
     ! Input of stepsize:
-    write (*,*) "Total number of steps: "
-    read  (*,*) ncall
-    write (*,*) "Step size: "
-    read (*,*) xdt
-    !xdt = (oscs*2.0_mk*pi)/real(ncall,kind=mk)
+    !write (*,*) "Total time length: "
+    !read  (*,*) tf
+    !write (*,*) "Step size: "
+    !read (*,*) xdt
+    tf = 2000000000
+    xdt = 200.0_mk
+    write(*,*) "xdt: ",xdt
+    ncall = int(tf/xdt)
 
-    ! File for reporting results:
-    open(9, file="testsymp.res", position="append")
-    call date_and_time(values=vals)
-    write (9,*) vals(1:3), "  ", vals(5:8)
-    write (9,*) "Dimension: ", qdim, "    Calls per cycle ", ncall
+    KrBfreq = (2*pi/sqrt(2.0_mk*0.000280108_mk/mu12))**(-1)
 
-    !Redefine initial conditions for Meyer
-    qi(1) = 1.0_mk !x
-    qi(2) = 0.5_mk !y
-    vqi(1) = 0.001_mk !v_x
-    vqi(2) = -0.001_mk !v_y
-    momentumi(1) = 0.0_mk !p_x
-    momentumi(2) = 0.0_mk !p_y
-    vmomentumi(1) = -0.001_mk !v_px
-    vmomentumi(2) = 0.001_mk !v_py
+    write(*,*) "omegaK2: ", omegaK2," omegaKRb:", omegaKRb
+    write(*,*) "DeK2:", DeK2*nanoKperEh
 
-    ! Assign initial conditions:
-    xq(1:dof) = qi !q's
+    do i = 95,95
+    !KEy2 = Vtoti(y1=7.5,y2=12.5)-DeK2 + beta
+    !KEy2 = (12820716171921.0_mk-DeK2*nanoKperEh) + 1.0e10_mk*real(i,mk)
+    KEy2 = 12820716171921.0_mk-DeK2*nanoKperEh + 1.0e6_mk
+    !write(*,*) 
+    write(*,*) "KEy2: ", KEy2
+    xtime = 0.0_mk
+    armtime = 0.0_mk
+    hyprad = 100.0_mk
+
+    ! Redefine hyperangle based on hyperradius
+    !hypang = atan(mu/mi(1)) + re(2,3)/hyprad !particles 2,3
+    !hypang = pi/2.0_mk - re(1,2)/hyprad + eps !particles 1,2
+    hypang = wellBottom!-0.1_mk
+    write(*,*) "Initial hyper angle: ", hypang
+
+    y1 = 7.5_mk!reKRb*sqrt(mu12/mu)*0.529177249_mk
+    y2 = 12.5_mk!25.0_mk
+    hyprad = sqrt(y1**2.0_mk + y2**2.0_mk)
+    hypang = atan(y2/y1)
+
+    ! ---------------------------- Set initial conditions here -------------------------------------
+    ! (in Bohr)
+    ! Initial conditions determined from hyper-radial coordinates
+    qi(1) = sqrt(mu)*hyprad*(sqrt(mu12)*cos(hypang)/mi(1) + sqrt(mu123)*sin(hypang)/(mi(1)+mi(2)))
+    qi(2) = sqrt(mu)*hyprad*(-sqrt(mu12)*cos(hypang)/mi(2) + sqrt(mu123)*sin(hypang)/(mi(1)+mi(2)))
+    qi(3) = -sqrt(mu*mu123)*hyprad*sin(hypang)/mi(3)
+    vqi(1) = 0.01_mk
+    vqi(2) = 0.01_mk
+    vqi(3) = 0.01_mk
+    !xq(1:dof) = qi !q's
+    y1dot = sqrt((2*KEy1/nanoKperEh)/mu)
+    y2dot = -sqrt((2*KEy2/nanoKperEh)/mu)
+    momentumi(1) = mi(1)*sqrt(mu)*(sqrt(mu12)*y1dot/mi(1) + sqrt(mu123)*y2dot/(mi(1)+mi(2)))
+    momentumi(2) = mi(2)*sqrt(mu)*(-sqrt(mu12)*y1dot/mi(2) + sqrt(mu123)*y2dot/(mi(1)+mi(2)))
+    momentumi(3) = -sqrt(mu*mu123)*y2dot
+    !Ptoti = momentumi(1)+momentumi(2)+momentumi(3)
+    !write(*,*) 'Ptot: ', Ptoti
+    !momentumi(1) = momentumi(1) - (mi(1)/Mtot)*Ptot
+    !momentumi(2) = momentumi(2) - (mi(2)/Mtot)*Ptot
+    !momentumi(3) = momentumi(3) - (mi(3)/Mtot)*Ptot
+    !Ptot = momentumi(1)+momentumi(2)+momentumi(3)
+    !write(*,*) 'Ptot new: ', Ptot
+    !xq(qdim+1:qdim+dof) = momentumi !p's
+    !write(*,*) 'Ei1: ', Ei*nanoKperEh, 'Ti1: ', Ti*nanoKperEh, 'Vtoti1: ', Vtoti*nanoKperEh
+
+    !call fstfwrd
+    ! (p's in m_e*Bohr/atm. time units)
+!    y1dot = sqrt(2*mu*(E12-V(abs(qi(1)-qi(2)), De(1,2), re(1,2), re(1,2))))/mu
+!    y2dot = sqrt(2*mu*(E123-V(abs(qi(1)-qi(3)), De(1,3), re(1,3), re(1,3))- &
+!            V(abs(qi(2)-qi(3)), De(2,3), re(2,3), re(2,3))))/mu
+    !y1dot = sqrt(2*KEy1/nanoKperEh/mu)
+    !y2dot = -sqrt(2*KEy2/nanoKperEh/mu)
+    !momentumi(1) = mi(1)*sqrt(mu)*(sqrt(mu12)*y1dot/mi(1) + sqrt(mu123)*y2dot/(mi(1)+mi(2)))
+    !momentumi(2) = mi(2)*sqrt(mu)*(-sqrt(mu12)*y1dot/mi(2) + sqrt(mu123)*y2dot/(mi(1)+mi(2)))
+    !momentumi(3) = -sqrt(mu*mu123)*y2dot
+    !momentumi = (/-1000.0_mk, 1000.0_mk, 1000.0_mk/)
+    vmomentumi(1) = 0.01_mk
+    vmomentumi(2) = 0.01_mk
+    vmomentumi(3) = 0.01_mk
+
+    ! Define p's as functions of the hyper-coordinates
+    !momentumi(1) = mi(1)*sqrt(mu)*hyprad*hypangdot*(-sin(hypang)*sqrt(mu12)/mi(1) + & 
+    !        sqrt(mu123)*cos(hypang)/(mi(1) + mi(2))) + mi(1)*hypraddot/hyprad*qi(1)
+    !momentumi(2) = mi(2)*sqrt(mu)*hyprad*hypangdot*(sin(hypang)*sqrt(mu12)/mi(1) + & 
+    !        sqrt(mu123)*cos(hypang)/(mi(1) + mi(2))) + mi(2)*hypraddot/hyprad*qi(2)
+    !momentumi(3) = -mi(3)*sqrt(mu)*hyprad*sqrt(mu123)*cos(hypang)*hypangdot/mi(3) - &
+    !        mi(3)*hypraddot/hyprad*qi(3)
+
+    ! Move to Xcm frame
+    !Ptoti = momentumi(1)+momentumi(2)+momentumi(3)
+    !write(*,*) 'Ptot: ', Ptoti
+    !momentumi(1) = momentumi(1) - (mi(1)/Mtot)*Ptot
+    !momentumi(2) = momentumi(2) - (mi(2)/Mtot)*Ptot
+    !momentumi(3) = momentumi(3) - (mi(3)/Mtot)*Ptot
+    !Ptot = momentumi(1)+momentumi(2)+momentumi(3)
+    !write(*,*) 'Ptot new: ', Ptot
+
+    ! Load initial conditions:
+!    xq(1:dof) = qi !q's
+!    qi(1) = 1.0_mk
+!    qi(2) = 1.0_mk
+!    momentumi(1) = 0.0_mk
+!    momentumi(2) = 0.0_mk
     xq(dof+1:qdim) = vqi !v_q's
     xq(qdim+1:qdim+dof) = momentumi !p's
     xq(qdim+dof+1:2*qdim) = vmomentumi !v_p's
+    xq(1:dof) = qi
+    normv0 = sqrt(sum(vqi**2)+sum(vmomentumi**2))
 
-    !data file for results
-    open(1, file = 'Meyerexp.dat')
-    !write(102,*) xtimie, 1/xtime*log((sum(xq(dof+1:qdim)**2)+sum(xq(qdim+dof+1:2*qdim)**2))**(1/2)/(sum(vqi**2)+sum(vmomentumi**2))**(1/2))
+    ! Define Jacobi Coordinates
+    call Jacobi
+
+    ! Files for results
+    open(1, file = 'traj.dat')
+    !write(1,*) xtime, qi
+    open(2, file = 'energy.dat')
+    open(3, file = 'Jacobi.dat')
+    open(4, file = 'lyapunov.dat')
+    !write(3,*) y1, y2, 0
+   ! write(*,*) 'Xcm: ', xcm
+
+    !do i = 0,1000
+    !    write(2,*) real(i,mk)/10.0_mk, V(real(i,mk)/10.0_mk,De(1,2),re(1,2),re(1,2))
+    !enddo
+
+    ! Calculate initial energy
+    call energy
+    ei = E
+    Ti = T
+    Vtoti = Vtot
+    write(*,*) "Ti: ", T*nanoKperEh, "Vtoti: ", Vtot*nanoKperEh, 'Ei: ', E*nanoKperEh
+    !write(*,*) 'Ei1 - Ei: ', (Ei - E)*nanoKperEh
 
     ! Integration loop:
     call algini                      ! First call
     intloop: do nn = 2, ncall
        call algrun ! Other calls
+!       if ((sqrt(y1**2 + y2**2) > radcutoff)) then
+!               exit
+!       endif
      enddo intloop
 
-    ! End check :
-    tf = ncall*xdt
-    qf = xq(1);
-    pf = xq(qdim+1)
-    phif = atan2(pf,qf)
-    !Check Meyer energy conservation
-    ei = 1/2*(momentumi(1)**2+momentumi(2)**2+qi(1)**2+qi(2)**2)+4*kMeyer*xq(1)**2*xq(2)**2 
-    ef = 1/2*(xq(1)**2+xq(2)**2+xq(5)**2+xq(6)**2)+4*kMeyer*xq(1)**2*xq(2)**2
-    normv0 = sqrt(sum(vqi**2)+sum(vmomentumi**2))
-    !write (*,*) "tf-2pi:    ", tf - 2.0_mk*pi
-    write (*,*) "Ef-E0:     ", ef - ei
-    !write (*,*) "qf-1:      ", qf - 1.0_mk
-    !write (*,*) "pf:        ", pf
-    !write (*,*) "phif(deg): ", phif*180.0_mk/pi
+    ! Energy conservation check :
+    call energy
+    write (*,*) "Ef:   ", E, "Ei:    ", ei
+    write (*,*) "Ef-Ei:     ", e - ei
 
-    !write (9,*) "tf-2pi:    ", tf - 2.0_mk*pi
-    !write (9,*) "Ef-E0:     ", ef - 1.0_mk
-    !write (9,*) "qf-1:      ", qf - 1.0_mk
-    !write (9,*) "pf:        ", pf
-    !write (9,*) "phif(deg): ", phif*180.0_mk/pi
-    call date_and_time(values=vals)
-    !write (9,*) vals(1:3), "  ", vals(5:8) 
-    !write (9,*)
+    ! Calculate final hyper-radial coordinates
+    hypang = atan(y2/y1)
+    hyprad = sqrt(y1**2 + y2**2)
 
-    CLOSE (9)
+    write(*,*) "Colision time (ns): ", xtime*secperatu*1e9_mk
+
+    ! Determine exit channel
+    if ((abs(y1) < 30.0_mk).AND.(y1 >= 0.0_mk)) then
+            write(*,*) '1-2 dimer was formed (right).'
+            coltype = 1
+             count12 = count12 + 1
+    else if ((abs(y1) < 30.0_mk).AND.(y1 <= 0.0_mk)) then
+            write(*,*) '1-2 dimer was formed (left).'
+            coltype = 2
+             count12 = count12 + 1
+    else if ( (hypang<(theta13+15.0/hyprad)).AND.(hypang>(theta13-15.0_mk/hyprad)) ) then
+            write(*,*) '1-3 dimer was formed (right).'
+            coltype = 3
+             count13 = count13 + 1
+    else if ( (hypang<(-theta13+15.0/hyprad)).AND.(hypang>(-theta13-15.0_mk/hyprad)) ) then
+            write(*,*) '1-3 dimer was formed (left).'
+            coltype = 4
+             count13 = count13 + 1
+    else if ( (hypang<(theta23+15.0/hyprad)).AND.(hypang>(theta23-15.0_mk/hyprad)) ) then
+            write(*,*) '2-3 dimer was formed (right).'
+            coltype = 5
+             count23 = count23 + 1
+    else if ( (hypang<(-theta23+15.0/hyprad)).AND.(hypang>(-theta23-15.0_mk/hyprad)) ) then
+            write(*,*) '2-3 dimer was formed (left).'
+            coltype = 6
+             count23 = count23 + 1
+    else
+            write(*,*) 'Result was indeterminate.'
+            coltype = 7
+             countind = countind + 1
+    endif
+
+    write(*,*) KEy2, E, FLI, armtime, sqrt(y1**2+y2**2), coltype
+    enddo
+
     close (1)
-
+    close (2)
+    close (3)
+    close (4)
+    call CPU_time(finish)
+    write(*,*) "I took ", finish-start, "sec"
   end program testsymp
 
   !----------------------------------------------------------------------
@@ -311,24 +515,24 @@
 
     implicit none
 
-    integer :: nn, ii
-    real (kind = mk) normv, normv0
+    integer :: nn, ii, i, j
+    real (kind = mk), external :: r, V, dVdr, d2Vdr2, Vext, dVextdx, d2Vextdx2, De, re, apar
 
     real (kind = mk), dimension (0:2*nc) :: hhc
     real (kind = mk), dimension (1:2*qdim) :: xqh, fvh
 
-    external pots1, potsMeyer2
+    external pots1 ,potsMeyer2, potsnbody2, pots2
 
     entry algini
 
-    write (*,*) "typ ", typ, " nc: ", nc
-    write (9,*) "typ ", typ, " nc: ", nc
+!    write (*,*) "typ ", typ, " nc: ", nc
+!    write (9,*) "typ ", typ, " nc: ", nc
     ! Compute full set of coefficients:
     hhc(0:nc) = ai(0:nc)
     hhc(nc+1:2*nc) = ai(nc-1:0:-1)
     ! Check integrity of coefficients (sum must be 2.0):
-          write (*,*)"sum of hh ", sum(hhc)
-          write (*,*)
+!          write (*,*)"sum of hh ", sum(hhc)
+!          write (*,*)
 
     hhc(0:2*nc) = xdt*hhc(0:2*nc)
 
@@ -342,7 +546,7 @@
           call pots1      ! dT/dp
           fvh(1:qdim) = fvh(1:qdim) + fv(qdim+1:2*qdim)*hhc(ii)
           xq(1:qdim) = xqh(1:qdim) + fvh(1:qdim)
-          call potsMeyer2     ! -dV/dq
+          call potsnbody2     ! -dV/dq
           fvh((qdim+1):2*qdim)=fvh((qdim+1):2*qdim)+fv(1:qdim)*hhc(ii+1)
           xq( qdim+1:2*qdim) = xqh( qdim+1:2*qdim) + fvh( qdim+1:2*qdim)
        enddo
@@ -352,14 +556,14 @@
     else  choice                    ! Choose algorithm: typ = 2
 
        do ii = 0, 2*nc-2, 2
-          call potsMeyer2  ! -dV/dq
+          call potsnbody2  ! -dV/dq
           fvh( qdim+1:2*qdim) = fvh( qdim+1:2*qdim) + fv(1:qdim)*hhc(ii)
           xq( qdim+1:2*qdim) = xqh( qdim+1:2*qdim) + fvh( qdim+1:2*qdim)
           call pots1   ! dT/dp
           fvh(1:qdim) = fvh(1:qdim) + fv(qdim+1:2*qdim)*hhc(ii+1)
           xq(1:qdim) = xqh(1:qdim) + fvh(1:qdim)
        enddo
-       call potsMeyer2  ! -dV/dq
+       call potsnbody2  ! -dV/dq
        fvh(qdim+1:2*qdim) = fvh(qdim+1:2*qdim) + fv(1:qdim)*hhc(2*nc)
 
     endif choice
@@ -368,10 +572,22 @@
     xtime = xtime + xdt
 
     ! Calculate Lyapunov Indicator
-    normv0 = sqrt(vqi(1)**2+vqi(2)**2+vmomentumi(1)**2+vmomentumi(2)**2)
-    normv = sqrt(xq(3)**2+xq(4)**2+xq(7)**2+xq(8)**2)
+    !normv0 = sqrt(sum(vqi**2)+sum(vmomentumi**2))
+    normv = sqrt(sum(xq(dof+1:qdim)**2)+sum(xq(qdim+dof+1:2*qdim)**2))
     FLI = log(normv/normv0)/xtime
-    write(1,*) xtime, FLI
+
+    ! Caclulate Jacobi Coordinates
+    call Jacobi
+    call energy
+    if (sqrt(y1**2 + y2**2).gt.100.0_mk) then
+      armtime = armtime + xdt
+    endif
+
+    ! Output results
+    !write(1,*) xtime, xq(1:dof)
+    write(1,*) y1, y2, 0
+    !write(2,*) xtime, E
+    write(4,*) xtime*secperatu*1e9_mk, FLI, sqrt(y1**2 + y2**2)
     return
   end subroutine algo12
 
@@ -386,23 +602,24 @@
     return
   end subroutine pots1
 
-  !Subroutine for the Morse potential for n particles
-    subroutine potsMorse2
+  !Subroutine for arbitrary pairwise interaction for n particles
+    subroutine potsnbody2
     use coordinates
     implicit none
-    real (kind = mk), external :: r, V, dVdr, d2Vdr2
+    real (kind = mk), external :: r, V, dVdr, d2Vdr2, dVextdx, d2Vextdx2, De, re, apar
     integer, external :: vectpos
-    real (kind = mk) :: jsum, lsum !intermediate steps for v_pdots
+    real (kind = mk), dimension(1:nop) :: jsum, lsum, intsum = 0.0_mk
     integer :: n,j,m,k,o,l !j,k and l are particle numbers, m and o are coordinate numbers and n is  the position in the phase space-vector
     call masses
 
     ! Calculate all the pdots
     do n = 1,dof
        call indicies(n,m,k)
-       do j = 1,nop !sum over each particle
-          if (j == k) cycle !except the kth particle
-          fv(n) = fv(n)-dVdr(r(k,j))*(xq(vectpos(m,k))-xq(vectpos(m,j)))/r(k,j)
+       do j = 1,nop !consider interaction with each other particle
+          intsum(j) = -dVdr(r(k,j),De(k,j),re(k,j),apar(k,j))*(xq(vectpos(m,k))-xq(vectpos(m,j)))/r(k,j)
+          intsum(k) = 0.0_mk !except the kth particle
        enddo
+       fv(n) = sum(intsum) - dVextdx(n) !sum over all particles (execpt kth)
     enddo
 
     ! Calculate all the v_pdots
@@ -410,35 +627,39 @@
         call indicies(n-dof,m,k)
         do o = 1,d
            do j = 1, nop
-              if (j == k) cycle !skip kth particle
-              jsum = d2Vdr2(r(k,j))*(xq(vectpos(m,k))-xq(vectpos(m,j)))*(xq(vectpos(o,k))-xq(vectpos(o,j)))/r(k,j)**2
+              jsum(j) = d2Vdr2(r(k,j),De(k,j),re(k,j),apar(k,j))*(xq(vectpos(m,k))-xq(vectpos(m,j)))* &
+                      (xq(vectpos(o,k))-xq(vectpos(o,j)))/r(k,j)**2
+              jsum(k) = 0.0_mk
            enddo
            do l = 1,nop
-              lsum = d2Vdr2(r(l,k))*(xq(vectpos(m,l))-xq(vectpos(m,k)))*(xq(vectpos(o,k))-xq(vectpos(o,l)))/r(l,k)**2
+              lsum(l) = d2Vdr2(r(l,k),De(l,k),re(l,k),apar(l,k))*(xq(vectpos(m,l))-xq(vectpos(m,k)))* &
+                     (xq(vectpos(o,k))-xq(vectpos(o,l)))/r(l,k)**2
+              lsum(k) = 0.0_mk
            enddo
-
-           fv(n) = fv(n) - xq(vectpos(o,k)+dof)*jsum - 2*lsum
+           intsum(o) = -xq(vectpos(o,k)+dof)*sum(jsum)-sum(lsum)
         enddo
+        fv(n) = sum(intsum) - d2Vextdx2(n-dof)
     enddo
     return
-  end subroutine potsMorse2
+  end subroutine potsnbody2
 
-  !Subroutine for the Harmonic oscillator potential
+  ! Subroutine for the Harmonic oscillator potential
   subroutine pots2       ! pdots and v_pdots
     use coordinates
     call masses
-    fv(1:dof) = -xq(1:dof)*m !pdot = -dH/dq = -q*m
-    fv(dof+1:qdim) = -xq(dof+1:qdim)*m !v_pdot = -dK/dv_q = -v_q*d2H/dq2 = -v_q*m
+    fv(1:dof) = -xq(1:dof)*mass !pdot = -dH/dq = -q*m
+    fv(dof+1:qdim) = -xq(dof+1:qdim)*mass !v_pdot = -dK/dv_q = -v_q*d2H/dq2 = -v_q*m
     return
   end subroutine pots2
 
-  !Subroutines for the Meyer Hamiltonian
+  ! Subroutines for the Meyer Hamiltonian
   subroutine potsMeyer2
     use coordinates     ! pdots and v_pdots 
     fv(1) = -(xq(1)+8*kMeyer*xq(1)*xq(2)**2) !p1dot = -(q1 + 8*k*q1*q2^2)
     fv(2) = -(xq(2)+8*kMeyer*xq(2)*xq(1)**2) !p2dot = -(q2 + 8*k*q2*q1^2)
     fv(3) = -xq(3)*(1+8*kMeyer*xq(2)**2)-xq(4)*16*kMeyer*xq(1)*xq(2) !v_p1dot = -vq1(16*k*q1*q2)-vq2(1+8*kq2^2)
     fv(4) = -xq(4)*(1+8*kMeyer*xq(1)**2)-xq(3)*16*kMeyer*xq(1)*xq(2) !v_p2dot = -vq1(1+8*kq1^2)-vq2(16*k*q1*q2)
+    return
   end subroutine potsMeyer2
 
   ! Function to compute separation distance between the ith and jth particles
@@ -450,30 +671,70 @@
     r = sqrt(sum((xq((i-1)*d+1:i*d)-xq((j-1)*d+1:j*d))**2))
   end function
 
-  ! Functions to return the values of the Morse Potential and its derivatives
-  function V(sep)
+  ! Functions to return the values of the chosen potential and its derivatives
+  ! ------------------ Choose which potential the particles interact by here ---------------------
+  function V(sep, De, re, a)
     use coordinates
     implicit none
-    real (kind = mk), intent(in) :: sep
+    real (kind = mk), intent(in) :: sep, De, re, a
     real (kind = mk) :: V
-    V = De*(exp(-2*a*(sep-re))-2*exp(-a*(sep-re)))
+    !V = 0.5_mk*sep**2 !harm osc potential
+    !V = 0.0_mk !free particle
+    V = De*(1.0_mk-exp(-(sep-re)*a))**2.0_mk - De
+    !V =  De*(exp(-2*a*(sep-re))-2*exp(-a*(sep-re))) !Morse potential
   end function
 
-  function dVdr(sep)
+  function dVdr(sep, De, re, a)
     use coordinates
     implicit none
-    real (kind = mk), intent(in) :: sep
+    real (kind = mk), intent(in) :: sep, De, re, a
     real (kind = mk) :: dVdr
-    dVdr = De*(-2*a*exp(-2*a*(sep-re))+2*a*exp(-a*(sep-re)))
+    !dVdr = sep !harm osc potential
+    !dVdr = 0.0_mk !free particle
+    dVdr = (2.0_mk*De*a)*(1.0_mk-exp(-(sep-re)*a))*exp(-(sep-re)*a)
+    !dVdr = De*(-2*a*exp(-2*a*(sep-re))+2*a*exp(-a*(sep-re))) !Morse potential
   end function
 
-  function d2Vdr2(sep)
+  function d2Vdr2(sep, De, re, a)
     use coordinates
     implicit none
-    real (kind = mk), intent(in) :: sep
+    real (kind = mk), intent(in) :: sep, De, re, a
     real (kind = mk) :: d2Vdr2
-    d2Vdr2 = De*(4*a**2*exp(-2*a*(sep-re))-2*a**2*exp(-a*(sep-re)))
+    !d2Vdr2 = 1.0_mk !harm osc potential
+    !d2Vdr2 = 0.0_mk !free partilce
+    d2Vdr2 = (2.0_mk*De*a**2.0_mk)*exp(-2.0_mk*(sep-re)*a)*(-exp((sep-re)*a)+2.0_mk)
+    !d2Vdr2 = De*(4*a**2*exp(-2*a*(sep-re))-2*a**2*exp(-a*(sep-re))) !Morse potential
   end function
+  ! ------------------------------------------------------------------------------------------------ 
+
+  ! Functions to return values of external potential (like a harm osc trap)
+  function Vext(n)
+    use coordinates
+    implicit none
+    integer, intent(in) :: n
+    real (kind = mk) :: Vext
+    call masses
+    Vext = 0.5_mk*mass(n)*omegaext**2*xq(n)**2
+  end function
+
+  function dVextdx(n)
+    use coordinates
+    implicit none
+    integer, intent(in) :: n
+    real (kind = mk) :: dVextdx
+    call masses
+    dVextdx = mass(n)*omegaext**2*xq(n)
+  end function
+
+  function d2Vextdx2(n)
+    use coordinates
+    implicit none
+    integer, intent(in) :: n
+    real (kind = mk) :: d2Vextdx2
+    call masses
+    d2Vextdx2 = mass(n)*omegaext**2
+  end function
+  ! ------------------------------------------------------------------------------------------------
 
   ! Function which returns the coordinate number and particle number based on the position in the 
   ! phase-space vector
@@ -498,6 +759,187 @@
     integer, intent(in) :: coordnum, partnum
     integer :: vectpos
     vectpos = d*(partnum-1)+coordnum
-  end function 
+  end function
 
-!  ****
+  ! Function to choose the correct dissociation energy in Hartree
+  function De(part1, part2)
+    use coordinates
+    implicit none
+    integer, intent(in) :: part1, part2
+    real (kind = mk) :: De
+    if (partkind(part1) == 0 .AND. partkind(part2) == 0) then 
+         De = DeK2
+    else if ((partkind(part1)==0 .AND.partkind(part2)==1).OR.(partkind(part1)==1 .AND.partkind(part2)==0)) then
+         De = DeKRb
+    else !(part1 == 1 .AND. part2 == 1) 
+         De = DeRb2
+    endif
+   end function
+
+   ! Function to choose the correct equilibrium distance in Bohr
+  function re(part1, part2)
+    use coordinates
+    implicit none
+    integer, intent(in) :: part1, part2
+    real (kind = mk) :: re
+    if (partkind(part1) == 0 .AND. partkind(part2) == 0) then
+        re = reK2
+    else if ((partkind(part1)==0 .AND.partkind(part2)==1).OR.(partkind(part1)==1 .AND.partkind(part2)==0)) then 
+        re = reKRb
+    else !(part1 == 1 .AND. part2 == 1) 
+        re = reRb2
+    endif
+  end function
+
+     ! Function to choose the correct a_Morse parameter
+   function apar(part1, part2)
+     use coordinates
+     implicit none
+     integer, intent(in) :: part1, part2
+     real (kind = mk) :: apar
+     call masses
+     if (partkind(part1) == 0 .AND. partkind(part2) == 0) then
+          apar = aK2
+     else if ((partkind(part1)==0 .AND.partkind(part2)==1).OR.(partkind(part1)==1 .AND.partkind(part2)==0)) then
+          apar = aKRb
+     else !(part1 == 1 .AND. part2 == 1)
+          apar = aRb2
+     endif
+   end function
+
+
+   ! Subroutine to compute the energy of the system (in Hartree)
+   subroutine energy
+     use coordinates
+     real (kind = mk), external :: r, De, re, V, Vext, apar
+     Vtot = 0.0_mk
+     T = sum((xq(qdim+1:qdim+dof))**2/(2*mass))
+     do i = 1,nop
+         do j = i+1,nop
+             Vtot = Vtot + V(r(i,j), De(i,j), re(i,j), apar(i,j))
+         enddo
+     enddo
+     do j = 1,dof
+         Vtot = Vtot + Vext(j)
+     enddo
+     E = T + Vtot
+     return
+   end subroutine energy
+
+   ! Function to create a plot of the potential surface
+   subroutine potmap
+     use coordinates
+     real (kind = mk) x1, x2, x3, r12, r13, r23, V12, V23, V13
+     real (kind = mk), external :: r, De, re, V, Vext
+     call masses
+         ! Create map of potential
+    do i = -100,100 !y1
+        do j = -100,100 !y2
+            Vtot = 0.0_mk
+            x1 = sqrt(mu)*(sqrt(mu12)*real(i,mk)/(mi(1)*10.0_mk) + sqrt(mu123)*real(j,mk)/ &
+                    ((mi(1)+mi(2))*10.0_mk))
+            x2 = sqrt(mu)*(-sqrt(mu12)*real(i,mk)/(mi(1)*10.0_mk) + sqrt(mu123)*real(j,mk)/ &
+                    ((mi(1)+mi(2))*10.0_mk))
+            x3 = sqrt(mu)*(-sqrt(mu123)*real(j,mk)/(mi(3)*10.0_mk))
+            r12 = abs(x1 - x2)
+            r13 = abs(x1 - x3)
+            r23 = abs(x2 - x3)
+            V12 = V(r12,De(1,2),re(1,2),re(1,2))
+            V13 = V(r13,De(1,3),re(1,3),re(1,3))
+            V23 = V(r23,De(2,3),re(2,3),re(2,3))
+            Vtot = V12 + V13 + V23 + &
+                    0.5_mk*mu*omegaext**2*((real(i,mk)/10.0_mk)**2+(real(j,mk)/10.0_mk)**2)
+            write(4,*) real(i,mk)/10.0_mk, real(j,mk)/10.0_mk, Vtot
+        enddo
+        write(4,*)
+    enddo
+    return
+    end subroutine potmap
+
+    ! Function to calculate jacobi coordinates
+    subroutine Jacobi
+      use coordinates
+      implicit none
+      call masses
+      xcm = sqrt(Mtot/mu)*(mi(1)*xq(1) + mi(2)*xq(2) + mi(3)*xq(3))/Mtot
+      y1 = sqrt(mu12/mu)*(xq(1)-xq(2))
+      y2 = sqrt(mu123/mu)*((mi(1)*xq(1) + mi(2)*xq(2))/(mi(1) + mi(2)) - xq(3))
+    end subroutine Jacobi
+
+    ! Subroutine to skip through slow initial oscillations
+    subroutine fstfwrd
+      use coordinates
+      implicit none
+      real(kind=mk), parameter ::                                       &
+         & pi = 3.1415926535897932384626433832795029_mk
+      real (kind = mk), external :: re
+      real (kind = mk) Vtemp, Vfwrd, deltaV
+      call energy
+      Vtemp = Vtot !Calculate initial potential energy
+      hyprad = 50.0_mk ! Redefine position to skip slow beginning oscs
+      hypang = pi/2.0_mk - re(1,2)/hyprad + eps*hyprad/100.0_mk !particles 1,2
+      qi(1) = sqrt(mu)*hyprad*(sqrt(mu12)*cos(hypang)/mi(1) + sqrt(mu123)*sin(hypang)/(mi(1)+mi(2)))
+      qi(2) = sqrt(mu)*hyprad*(-sqrt(mu12)*cos(hypang)/mi(2) + sqrt(mu123)*sin(hypang)/(mi(1)+mi(2)))
+      qi(3) = -sqrt(mu*mu123)*hyprad*sin(hypang)/mi(3)
+      !write(*,*) y1, y2
+      !y1 = cos(hypang)*hyprad
+      !y2 = 50.0_mk
+      !qi(1) = sqrt(mu)*(sqrt(mu12)*y1/mi(1) + sqrt(mu123)*y2/(mi(1)+mi(2)))
+      !qi(2) = sqrt(mu)*(-sqrt(mu12)*y1/mi(2) + sqrt(mu123)*y2/(mi(1)+mi(2)))
+      !qi(3) = -sqrt(mu*mu123)*y2/mi(3)
+      xq(1:dof) = qi
+      call energy
+      Vfwrd = Vtot !Calculate final potential energy
+      deltaV = Vfwrd - Vtemp
+      KEy2 = KEy2 - deltaV*nanoKperEh
+      !write(*,*) 'Vint: ', Vtemp, 'Vfin: ', Vfwrd, 'deltaV: ', deltaV
+    end subroutine fstfwrd
+
+    subroutine rng
+      use coordinates
+      implicit none
+      real (kind = mk), external :: gauss
+      real (kind = mk) :: rvec(rngsize*2)
+      integer :: i
+      logical :: choose(rngsize*2)
+      ! Create vector of random numbers, first rngsize elements are x's, sencond rngsize are y's
+      call rgnf_lux(rngvec,rngsize*2)
+      rvec = real(rngvec,mk)
+      rvec(1:size(rvec)/2) = 8.0_mk*cgauss*rvec(1:size(rvec)/2) - 4.0_mk*cgauss + bgauss
+      !write(*,*) rvec
+      do i = 1, rngsize
+         if ( gauss(rvec(i)) < rvec(i+rngsize) ) then 
+            choose(i) = .FALSE.
+            choose(i+rngsize) = choose(i)
+         else 
+            choose(i) = .TRUE.
+            choose(i+rngsize) = choose(i)
+         endif
+      enddo
+      rvecselect = pack(rvec, choose)
+      !write(*,*) choose
+      write(*,*) 'the number of remaining points is: ', size(rvecselect)/2
+      write(*,*) rngsize
+      write(*,*) 'the fraction of points that survived is: ', real(size(rvecselect))/real(rngsize*2)
+      open (102, file = 'rng.dat')
+      open (103, file = 'rngunfilterd.dat')
+      do i = 1, size(rvecselect)/2
+         write(102,*) rvecselect(i), rvecselect(size(rvecselect)/2+i)
+      enddo
+      do i = 1, rngsize
+         write(103,*) rvec(i), rvec(rngsize + i)
+      enddo
+      !write(102,*) rvecselect(size(rvecselect)/2+1:size(rvecselect))
+      close(102)
+      close(103)
+    end subroutine rng
+
+    function gauss(x)
+      use coordinates
+      implicit none
+      real (kind = mk), intent(in) :: x
+      real (kind = mk) :: gauss
+      gauss = agauss*exp(-((x-bgauss)**2)/(2*cgauss**2))
+    end function
+
+
